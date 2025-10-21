@@ -34,16 +34,19 @@ class Report:
     source_file: str
 
 # ==================== Regex =====================
-import re
 PAT = {
     "title": re.compile(r"^#\s*Relato\s*[\-–]\s*Sprint\s*(?P<sprint>\d+).*?\((?P<artifact>.*?)\)", re.I),
     "overall": re.compile(r"Nota\s+[^\:]+:\s*(?P<score>[\d\.,]+)", re.I),
+
     "h2_temas": re.compile(r"^##\s*Temas", re.I),
     "h2_space": re.compile(r"^##\s*SPACE", re.I),
     "h2_top":   re.compile(r"^##\s*Top\s*5", re.I),
     "h2_bot":   re.compile(r"^##\s*Bottom\s*5", re.I),
     "h2_sug":   re.compile(r"^##\s*Sugest", re.I),
+
+    # - Texto: 9.58
     "line_qv": re.compile(r"^\-\s+\*?\*?(?P<q>.+?)\*?\*?\:\s*(?P<v>[\d\.,]+)\s*$"),
+    # SPACE-C (...): 7.85
     "space_item": re.compile(r"\*?\*?SPACE[\-\s]?([PCEWSA])\b.*?\:\s*([\d\.,]+)", re.I),
 }
 
@@ -123,7 +126,8 @@ def parse_relato_md(text: str, fname: str) -> Report:
         elif mode == "bottom":
             m = PAT["line_qv"].match(l)
             if m:
-                bottom5.append((m.group("q").strip(), _to_float(m.group("v"))))
+                # <<< CORREÇÃO: usar 'bot5', não 'bottom5' >>>
+                bot5.append((m.group("q").strip(), _to_float(m.group("v"))))
         elif mode == "sug":
             if l.startswith("- "): l = l[2:]
             sug.append(l)
@@ -135,7 +139,7 @@ def parse_relato_md(text: str, fname: str) -> Report:
 
     return Report(
         artifact=artifact, sprint=sprint, team=None, overall=overall,
-        space=space_named, themes=themes, top5=top5, bottom5=bottom5,
+        space=space_named, themes=themes, top5=top5, bottom5=bot5,
         suggestions="\n".join(sug) if sug else None, source_file=fname
     )
 
@@ -187,7 +191,6 @@ col3.metric("Sprint destaque", df.groupby("Sprint")["Nota"].mean().idxmax() if n
 st.subheader("Evolução por Sprint (uma linha por dimensão)")
 df_line = (df.groupby(["Dimensão","Sprint"], as_index=False)["Nota"]
              .mean().sort_values("Sprint", key=lambda s: s.str.extract(r"(\d+)").astype(int)[0]))
-# emoji por faixa
 def mood_emoji(v):
     if pd.isna(v): return ""
     if v >= 7.5: return "😄"
@@ -197,7 +200,6 @@ df_line["Emoji"] = df_line["Nota"].apply(mood_emoji)
 
 fig_line = px.line(df_line, x="Sprint", y="Nota", color="Dimensão",
                    markers=True, height=420)
-# adiciona emoji sobre cada ponto
 for dim, sub in df_line.groupby("Dimensão"):
     fig_line.add_trace(go.Scatter(
         x=sub["Sprint"], y=sub["Nota"], mode="text",
@@ -210,13 +212,10 @@ st.plotly_chart(fig_line, use_container_width=True)
 # 2) “PONTINHOS” POR ARTEFATO – ÚLTIMA SPRINT
 # =========================================================
 st.subheader("Última Sprint – Notas por Artefato (pontos por dimensão)")
-
-# última sprint dentre as selecionadas
 def sprint_num(s): 
     m = re.findall(r"\d+", s); return int(m[0]) if m else -1
 last_sprint = sorted(set(df["Sprint"]), key=sprint_num)[-1]
 
-# monta dataframe com um ponto por (artefato, dimensão)
 def artifact_label(art):
     if "Planning" in art: return "Planning"
     if "Daily" in art: return "Daily"
@@ -228,21 +227,17 @@ points=[]
 for r in reports:
     if r.sprint != last_sprint: continue
     for k,v in r.space.items():
-        # converte SPACE-? em rótulos curtos pt-BR
         letter = re.search(r"SPACE\-([PCEWSA])", k.upper())
         if not letter: continue
-        short = SPACE_SHORT[letter.group(1)]
+        short = {"P":"Performance","C":"Comunicação e Colaboração","E":"Eficiência e Flow",
+                 "W":"Satisfação e Bem-Estar","S":"Satisfação e Bem-Estar","A":"Activity"}[letter.group(1)]
         if short == "Activity": continue
-        points.append({
-            "Artefato": artifact_label(r.artifact),
-            "Dimensão": short,
-            "Nota": v
-        })
+        points.append({"Artefato": artifact_label(r.artifact), "Dimensão": short, "Nota": v})
+
 df_pts = pd.DataFrame(points)
 order_y = ["Planning","Daily","Retro","Geral"]
 df_pts["Artefato"] = pd.Categorical(df_pts["Artefato"], categories=order_y, ordered=True)
 
-# scatter do tipo strip horizontal
 fig_pts = px.strip(df_pts, x="Nota", y="Artefato", color="Dimensão",
                    orientation="h", stripmode="overlay", height=380)
 fig_pts.update_traces(jitter=0.08, marker_size=10)
@@ -254,18 +249,16 @@ st.plotly_chart(fig_pts, use_container_width=True)
 # 3) BLOCO – ANÁLISE COM IA (O Produtivo)
 # =========================================================
 st.markdown("""
-<div style="
-    background:#4B55B2;
-    color:#fff; padding:22px; border-radius:14px;
-    display:flex; align-items:center; gap:18px;">
+<div style="background:#4B55B2;color:#fff; padding:22px; border-radius:14px;
+            display:flex; align-items:center; gap:18px;">
   <div style="font-size:44px; line-height:1">🧠</div>
   <div>
     <h3 style="margin:0 0 6px 0;">Síntese textual com IA – O Produtivo</h3>
     <div style="opacity:.92;">
       Esta seção gera um resumo automático combinando números e comentários.
-      Exemplo: <em>“Well-Being subiu na Sprint 1 pela força de Comunicação (Daily/Planning),
-      porém Retro indica oportunidades em Ação & Aprendizado. Foque em 1) documentar decisões,
-      2) transparência pós-sprint e 3) equilibrar carga.”</em>
+      Exemplo: <em>“Well-Being subiu pela força de Comunicação (Daily/Planning),
+      mas Retro indica oportunidades em Ação & Aprendizado. Priorize 1) documentar decisões,
+      2) transparência pós-sprint e 3) balancear carga.”</em>
     </div>
   </div>
 </div>
@@ -274,7 +267,7 @@ st.markdown("""
 st.divider()
 
 # =========================================================
-# 4) DETALHES – DIMENSÃO → ARTEFATOS (o que já existia)
+# 4) DETALHES – DIMENSÃO → ARTEFATOS
 # =========================================================
 st.subheader("SPACE por dimensão (média das sprints filtradas)")
 fig = px.bar(df.groupby(["Dimensão","Sprint"], as_index=False)["Nota"].mean(),
