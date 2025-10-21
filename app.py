@@ -1,12 +1,13 @@
-import os, re, textwrap, pathlib
+import os, re, pathlib
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
-# clique no gráfico (opcional, tem fallback)
+# clique no gráfico (opcional, fallback automático)
 try:
     from streamlit_plotly_events import plotly_events
     HAS_PLOTLY_EVENTS = True
@@ -33,16 +34,15 @@ class Report:
     source_file: str
 
 # ==================== Regex =====================
+import re
 PAT = {
     "title": re.compile(r"^#\s*Relato\s*[\-–]\s*Sprint\s*(?P<sprint>\d+).*?\((?P<artifact>.*?)\)", re.I),
     "overall": re.compile(r"Nota\s+[^\:]+:\s*(?P<score>[\d\.,]+)", re.I),
-
     "h2_temas": re.compile(r"^##\s*Temas", re.I),
     "h2_space": re.compile(r"^##\s*SPACE", re.I),
     "h2_top":   re.compile(r"^##\s*Top\s*5", re.I),
     "h2_bot":   re.compile(r"^##\s*Bottom\s*5", re.I),
     "h2_sug":   re.compile(r"^##\s*Sugest", re.I),
-
     "line_qv": re.compile(r"^\-\s+\*?\*?(?P<q>.+?)\*?\*?\:\s*(?P<v>[\d\.,]+)\s*$"),
     "space_item": re.compile(r"\*?\*?SPACE[\-\s]?([PCEWSA])\b.*?\:\s*([\d\.,]+)", re.I),
 }
@@ -61,6 +61,14 @@ SPACE_NAME = {
     "SPACE-W": "SPACE-W (Satisfaction & Well-Being)",
     "SPACE-S": "SPACE-S (Satisfaction)",   # se algum relato usar “S”
     "SPACE-A": "SPACE-A (Activity)",
+}
+SPACE_SHORT = {
+    "P": "Performance",
+    "C": "Comunicação e Colaboração",
+    "E": "Eficiência e Flow",
+    "W": "Satisfação e Bem-Estar",
+    "S": "Satisfação e Bem-Estar",  # sinônimo caso venha como S
+    "A": "Activity",
 }
 
 def parse_relato_md(text: str, fname: str) -> Report:
@@ -101,9 +109,7 @@ def parse_relato_md(text: str, fname: str) -> Report:
                 if m2 and m2.group("q").upper().startswith("SPACE-"):
                     # Ex.: "- SPACE-C (Communication...): 7.85"
                     key = m2.group("q").split(":")[0].strip()
-                    # tenta extrair a letra
-                    code = " ".join(key.split()).upper()
-                    letter = re.search(r"SPACE[\-\s]?([PCEWSA])", code)
+                    letter = re.search(r"SPACE[\-\s]?([PCEWSA])", key.upper())
                     if letter:
                         space[f"SPACE-{letter.group(1)}"] = _to_float(m2.group("v"))
         elif mode == "temas":
@@ -117,7 +123,7 @@ def parse_relato_md(text: str, fname: str) -> Report:
         elif mode == "bottom":
             m = PAT["line_qv"].match(l)
             if m:
-                bot5.append((m.group("q").strip(), _to_float(m.group("v"))))
+                bottom5.append((m.group("q").strip(), _to_float(m.group("v"))))
         elif mode == "sug":
             if l.startswith("- "): l = l[2:]
             sug.append(l)
@@ -129,7 +135,7 @@ def parse_relato_md(text: str, fname: str) -> Report:
 
     return Report(
         artifact=artifact, sprint=sprint, team=None, overall=overall,
-        space=space_named, themes=themes, top5=top5, bottom5=bot5,
+        space=space_named, themes=themes, top5=top5, bottom5=bottom5,
         suggestions="\n".join(sug) if sug else None, source_file=fname
     )
 
@@ -148,56 +154,147 @@ if not reports:
     st.error("Nenhum relato encontrado em data/relatos/*.md")
     st.stop()
 
-# tabela SPACE agregada (Dimensão x Sprint x Nota)
+# Tabela SPACE agregada (Dimensão x Sprint x Nota)
 rows=[]
 for r in reports:
     for dim,score in r.space.items():
         if score is not None:
             rows.append({"Dimensão": dim, "Sprint": r.sprint, "Nota": score, "Artefato": r.artifact})
 agg = pd.DataFrame(rows)
-
-# remove Activity se houver
-agg = agg[~agg["Dimensão"].str.startswith("SPACE-A")]
+agg = agg[~agg["Dimensão"].str.startswith("SPACE-A")]  # remove Activity
 
 # ==================== Filtros ====================
 st.sidebar.title("Filtros")
-sprints = sorted(agg["Sprint"].unique().tolist())
+sprints = sorted(agg["Sprint"].unique().tolist(), key=lambda s: int(re.findall(r"\d+", s)[0]))
 dims = sorted(agg["Dimensão"].unique().tolist())
 
 sprint_sel = st.sidebar.multiselect("Sprint", sprints, default=sprints)
 dim_sel = st.sidebar.multiselect("Dimensões SPACE", dims, default=dims)
 
 df = agg.query("Sprint in @sprint_sel and Dimensão in @dim_sel").copy()
+
 st.title("NES · SPACE Dashboard")
 
-# KPIs
+# ==================== KPIs ====================
 col1, col2, col3 = st.columns(3)
 col1.metric("Média geral", f"{df['Nota'].mean():.2f}")
-col2.metric("Dimensão destaque", df.groupby("Dimensão")["Nota"].mean().idxmax())
-col3.metric("Sprint destaque", df.groupby("Sprint")["Nota"].mean().idxmax())
+col2.metric("Dimensão destaque", df.groupby("Dimensão")["Nota"].mean().idxmax() if not df.empty else "—")
+col3.metric("Sprint destaque", df.groupby("Sprint")["Nota"].mean().idxmax() if not df.empty else "—")
 
-# ==================== Gráfico principal ====================
-st.subheader("SPACE por dimensão (soma de todos os artefatos)")
+# =========================================================
+# 1) GRÁFICO DE LINHAS POR SPRINT (com emoji no ponto)
+# =========================================================
+st.subheader("Evolução por Sprint (uma linha por dimensão)")
+df_line = (df.groupby(["Dimensão","Sprint"], as_index=False)["Nota"]
+             .mean().sort_values("Sprint", key=lambda s: s.str.extract(r"(\d+)").astype(int)[0]))
+# emoji por faixa
+def mood_emoji(v):
+    if pd.isna(v): return ""
+    if v >= 7.5: return "😄"
+    if v >= 6.0: return "😐"
+    return "🙁"
+df_line["Emoji"] = df_line["Nota"].apply(mood_emoji)
 
+fig_line = px.line(df_line, x="Sprint", y="Nota", color="Dimensão",
+                   markers=True, height=420)
+# adiciona emoji sobre cada ponto
+for dim, sub in df_line.groupby("Dimensão"):
+    fig_line.add_trace(go.Scatter(
+        x=sub["Sprint"], y=sub["Nota"], mode="text",
+        text=sub["Emoji"], textposition="top center", showlegend=False
+    ))
+fig_line.update_yaxes(range=[0,10])
+st.plotly_chart(fig_line, use_container_width=True)
+
+# =========================================================
+# 2) “PONTINHOS” POR ARTEFATO – ÚLTIMA SPRINT
+# =========================================================
+st.subheader("Última Sprint – Notas por Artefato (pontos por dimensão)")
+
+# última sprint dentre as selecionadas
+def sprint_num(s): 
+    m = re.findall(r"\d+", s); return int(m[0]) if m else -1
+last_sprint = sorted(set(df["Sprint"]), key=sprint_num)[-1]
+
+# monta dataframe com um ponto por (artefato, dimensão)
+def artifact_label(art):
+    if "Planning" in art: return "Planning"
+    if "Daily" in art: return "Daily"
+    if "Retro" in art or "Retrospectiva" in art: return "Retro"
+    if "Survey" in art or "Geral" in art: return "Geral"
+    return art
+
+points=[]
+for r in reports:
+    if r.sprint != last_sprint: continue
+    for k,v in r.space.items():
+        # converte SPACE-? em rótulos curtos pt-BR
+        letter = re.search(r"SPACE\-([PCEWSA])", k.upper())
+        if not letter: continue
+        short = SPACE_SHORT[letter.group(1)]
+        if short == "Activity": continue
+        points.append({
+            "Artefato": artifact_label(r.artifact),
+            "Dimensão": short,
+            "Nota": v
+        })
+df_pts = pd.DataFrame(points)
+order_y = ["Planning","Daily","Retro","Geral"]
+df_pts["Artefato"] = pd.Categorical(df_pts["Artefato"], categories=order_y, ordered=True)
+
+# scatter do tipo strip horizontal
+fig_pts = px.strip(df_pts, x="Nota", y="Artefato", color="Dimensão",
+                   orientation="h", stripmode="overlay", height=380)
+fig_pts.update_traces(jitter=0.08, marker_size=10)
+fig_pts.update_xaxes(range=[0,10], title="Nota (0–10)")
+fig_pts.update_yaxes(title="")
+st.plotly_chart(fig_pts, use_container_width=True)
+
+# =========================================================
+# 3) BLOCO – ANÁLISE COM IA (O Produtivo)
+# =========================================================
+st.markdown("""
+<div style="
+    background:#4B55B2;
+    color:#fff; padding:22px; border-radius:14px;
+    display:flex; align-items:center; gap:18px;">
+  <div style="font-size:44px; line-height:1">🧠</div>
+  <div>
+    <h3 style="margin:0 0 6px 0;">Síntese textual com IA – O Produtivo</h3>
+    <div style="opacity:.92;">
+      Esta seção gera um resumo automático combinando números e comentários.
+      Exemplo: <em>“Well-Being subiu na Sprint 1 pela força de Comunicação (Daily/Planning),
+      porém Retro indica oportunidades em Ação & Aprendizado. Foque em 1) documentar decisões,
+      2) transparência pós-sprint e 3) equilibrar carga.”</em>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.divider()
+
+# =========================================================
+# 4) DETALHES – DIMENSÃO → ARTEFATOS (o que já existia)
+# =========================================================
+st.subheader("SPACE por dimensão (média das sprints filtradas)")
 fig = px.bar(df.groupby(["Dimensão","Sprint"], as_index=False)["Nota"].mean(),
              x="Dimensão", y="Nota", color="Sprint", barmode="group", height=420)
 fig.update_yaxes(range=[0, 10])
 
 clicked_dim = None
 if HAS_PLOTLY_EVENTS:
-    from streamlit_plotly_events import plotly_events
     click = plotly_events(fig, click_event=True, hover_event=False, select_event=False, key="main")
     if click:
         clicked_dim = click[0].get("x")
 else:
     st.plotly_chart(fig, use_container_width=True)
 
+dims = sorted(df["Dimensão"].unique().tolist())
 if not clicked_dim:
     clicked_dim = st.selectbox("Escolha uma dimensão para detalhar:", dims)
 
 st.markdown(f"### 🔎 Detalhe da dimensão: **{clicked_dim}**")
 
-# ==================== Drill-down: Dimensão → Artefatos ====================
 df_dim = df[df["Dimensão"] == clicked_dim]
 art_table = (df_dim.groupby(["Artefato","Sprint"], as_index=False)["Nota"]
              .mean().sort_values(["Sprint","Nota"], ascending=[True, False]))
@@ -205,8 +302,7 @@ st.dataframe(art_table, use_container_width=True)
 
 art_sel = st.selectbox("Abrir artefato:", ["—"] + art_table["Artefato"].unique().tolist())
 if art_sel != "—":
-    # procura o(s) report(s) desse artefato nas sprints filtradas
-    reps = [r for r in reports if r.artifact == art_sel and r.sprint in sprint_sel]
+    reps = [r for r in reports if (r.artifact == art_sel) and (r.sprint in sprint_sel)]
     if not reps:
         st.info("Nenhum relato desse artefato para os filtros atuais.")
     else:
@@ -224,10 +320,10 @@ if art_sel != "—":
                     st.table(pd.Series(rep.themes, name="Nota"))
             with colB:
                 if rep.top5:
-                    st.write("**Top 5 perguntas**")
+                    st.write(f"**Top 5 perguntas — {rep.artifact}**")
                     st.table(pd.DataFrame(rep.top5, columns=["Pergunta","Nota"]))
                 if rep.bottom5:
-                    st.write("**Bottom 5 perguntas**")
+                    st.write(f"**Bottom 5 perguntas — {rep.artifact}**")
                     st.table(pd.DataFrame(rep.bottom5, columns=["Pergunta","Nota"]))
             if rep.suggestions:
                 st.write("**Sugestões**")
