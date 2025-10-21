@@ -117,7 +117,6 @@ def parse_relato_md(text: str, fname: str) -> Report:
         if PAT["h2_sug"].match(l):   mode="sug";    continue
 
         if mode == "space":
-            # aceita linhas no formato "- **SPACE-C ...**: 9.04"
             m = PAT["line_qv"].match(l)
             if m:
                 key = pretty_space_key(m.group("q"))
@@ -178,6 +177,12 @@ def display_artifact(a: str) -> str:
     a = a.replace("  ", " ").strip()
     return a
 
+def mood_emoji(v: float) -> str:
+    if v is None or pd.isna(v): return ""
+    if v >= 7.5: return "😄"
+    if v >= 6.0: return "😐"
+    return "🙁"
+
 # ---------- Carrega os .md ----------
 reports = load_reports(RELATOS_DIR)
 if not reports:
@@ -222,6 +227,32 @@ else:
     col1.metric("Média geral", "—")
     col2.metric("Dimensão destaque", "—")
     col3.metric("Sprint destaque", "—")
+
+# =========================================================
+# (NOVO) GRÁFICO DE LINHAS COM CARINHAS – Evolução por sprint
+# =========================================================
+st.subheader("Evolução por Sprint (uma linha por dimensão)")
+if df.empty:
+    st.info("Sem dados para os filtros atuais.")
+else:
+    df_line = (df.groupby(["Dimensão","Sprint"], as_index=False)["Nota"]
+                 .mean()
+                 .sort_values("Sprint", key=lambda s: s.str.extract(r"(\d+)").astype(int)[0]))
+    df_line["Emoji"] = df_line["Nota"].apply(mood_emoji)
+
+    fig_line = px.line(df_line, x="Sprint", y="Nota", color="Dimensão",
+                       markers=True, height=420)
+    # Emojis sobre cada ponto
+    for dim, sub in df_line.groupby("Dimensão"):
+        fig_line.add_trace(go.Scatter(
+            x=sub["Sprint"], y=sub["Nota"], mode="text",
+            text=sub["Emoji"], textposition="top center", showlegend=False
+        ))
+    fig_line.update_yaxes(range=[0,10], title="Nota (0–10)")
+    fig_line.update_xaxes(title="Sprint")
+    st.plotly_chart(fig_line, use_container_width=True)
+
+st.divider()
 
 # =========================================================
 # 1) “PONTINHOS POR ARTEFATO” – ÚLTIMA SPRINT
