@@ -209,41 +209,86 @@ fig_line.update_yaxes(range=[0,10])
 st.plotly_chart(fig_line, use_container_width=True)
 
 # =========================================================
-# 2) “PONTINHOS” POR ARTEFATO – ÚLTIMA SPRINT
+# 2) “PONTINHOS” POR ARTEFATO – ÚLTIMA SPRINT (patch)
 # =========================================================
 st.subheader("Última Sprint – Notas por Artefato (pontos por dimensão)")
-def sprint_num(s): 
-    m = re.findall(r"\d+", s); return int(m[0]) if m else -1
-last_sprint = sorted(set(df["Sprint"]), key=sprint_num)[-1]
 
-def artifact_label(art):
-    if "Planning" in art: return "Planning"
-    if "Daily" in art: return "Daily"
-    if "Retro" in art or "Retrospectiva" in art: return "Retro"
-    if "Survey" in art or "Geral" in art: return "Geral"
-    return art
+# 2.1 Detecta a última sprint disponível nos relatos (independe do filtro de cima)
+def _sprint_num(s):
+    m = re.search(r"(\d+)", s or "")
+    return int(m.group(1)) if m else -1
 
-points=[]
-for r in reports:
-    if r.sprint != last_sprint: continue
-    for k,v in r.space.items():
-        letter = re.search(r"SPACE\-([PCEWSA])", k.upper())
-        if not letter: continue
-        short = {"P":"Performance","C":"Comunicação e Colaboração","E":"Eficiência e Flow",
-                 "W":"Satisfação e Bem-Estar","S":"Satisfação e Bem-Estar","A":"Activity"}[letter.group(1)]
-        if short == "Activity": continue
-        points.append({"Artefato": artifact_label(r.artifact), "Dimensão": short, "Nota": v})
+all_sprints = sorted({r.sprint for r in reports}, key=_sprint_num)
+if not all_sprints:
+    st.info("Sem sprints nos relatos.")
+    last_sprint = None
+else:
+    # se o usuário filtrou sprints, respeita; senão usa a última de todas
+    filt = [s for s in all_sprints if not sprint_sel or s in sprint_sel]
+    last_sprint = (filt or all_sprints)[-1]
+    st.caption(f"Última sprint detectada: **{last_sprint}**")
 
-df_pts = pd.DataFrame(points)
-order_y = ["Planning","Daily","Retro","Geral"]
-df_pts["Artefato"] = pd.Categorical(df_pts["Artefato"], categories=order_y, ordered=True)
+# 2.2 Normalizações
+def _artifact_label(a: str) -> str:
+    t = (a or "").lower()
+    if "planning" in t: return "Planning"
+    if "daily" in t: return "Daily"
+    if "retro" in t or "retrospectiva" in t: return "Retro"
+    if "survey" in t: return "Geral"
+    return a or "—"
 
-fig_pts = px.strip(df_pts, x="Nota", y="Artefato", color="Dimensão",
-                   orientation="h", stripmode="overlay", height=380)
-fig_pts.update_traces(jitter=0.08, marker_size=10)
-fig_pts.update_xaxes(range=[0,10], title="Nota (0–10)")
-fig_pts.update_yaxes(title="")
-st.plotly_chart(fig_pts, use_container_width=True)
+SPACE_PT = {"P":"Performance", "C":"Comunicação e Colaboração",
+            "E":"Eficiência e Flow", "W":"Satisfação e Bem-Estar",
+            "S":"Satisfação e Bem-Estar", "A":None}
+
+def _space_to_label(k: str) -> Optional[str]:
+    m = re.search(r"SPACE[\-\s]?([PCEWSA])", (k or "").upper())
+    if not m: return None
+    return SPACE_PT.get(m.group(1))
+
+# 2.3 Constrói os pontos
+rows = []
+if last_sprint:
+    for r in reports:
+        if r.sprint != last_sprint: 
+            continue
+        for k, v in (r.space or {}).items():
+            dim = _space_to_label(k)
+            if dim is None or dim == "Activity" or v is None:
+                continue
+            try:
+                rows.append({
+                    "Artefato": _artifact_label(r.artifact),
+                    "Dimensão": dim,
+                    "Nota": float(str(v).replace(",", "."))
+                })
+            except Exception:
+                pass
+
+df_pts = pd.DataFrame(rows)
+
+if df_pts.empty:
+    st.warning("Não encontrei pontos para a última sprint. "
+               "Verifique se os relatos dessa sprint possuem a seção **SPACE** com notas.")
+else:
+    # Ordena Y apenas com categorias presentes
+    desired_order = ["Planning", "Daily", "Retro", "Geral"]
+    order_y = [c for c in desired_order if c in df_pts["Artefato"].unique()]
+    df_pts["Artefato"] = pd.Categorical(df_pts["Artefato"], categories=order_y, ordered=True)
+
+    fig_pts = px.strip(
+        df_pts, x="Nota", y="Artefato", color="Dimensão",
+        orientation="h", stripmode="overlay", height=380,
+        category_orders={"Artefato": order_y}
+    )
+    fig_pts.update_traces(jitter=0.12, marker_size=11, opacity=0.85)
+    fig_pts.update_xaxes(range=[0, 10], title="Nota (0–10)")
+    fig_pts.update_yaxes(title="")
+    st.plotly_chart(fig_pts, use_container_width=True)
+
+    with st.expander("Ver dados usados neste gráfico"):
+        st.dataframe(df_pts.sort_values(["Artefato", "Dimensão"]))
+
 
 # =========================================================
 # 3) BLOCO – ANÁLISE COM IA (O Produtivo)
