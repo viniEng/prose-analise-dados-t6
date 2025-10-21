@@ -372,6 +372,3 @@ if dims_for_select:
 else:
     st.info("Carregue ao menos uma dimensão nas sprints filtradas para ver o detalhe.")
 
-# ---------- Rodapé ----------
-st.caption("Este dashboard lê diretamente os .md dos seus scripts — novos arquivos aparecem automaticamente. "
-           "Se algum item não aparecer, confira a seção **## SPACE** dos relatos e a nomenclatura dos títulos.")
